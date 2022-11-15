@@ -3,12 +3,13 @@ const app = express();
 const http = require("http");
 const server = http.createServer(app);
 const { Server } = require("socket.io");
+// for cors test
 const io = new Server(server, {
   cors: {
     origin: "*",
   },
 });
-
+// wrtc: node.js webrtc impl
 const webrtc = require("wrtc");
 
 const PORT = 3004;
@@ -20,22 +21,31 @@ const pubMap = new Map();
 // uid => peerconnection
 const subMap = new Map();
 
+// auto-inc id
 let uid = 0;
 io.on("connection", (socket) => {
+  // uid should be string
   socket.id = "" + uid;
   uid++;
   console.log(`user@${socket.id} connected`);
+  // send uid to client
   socket.send({
     type: "hi",
     uid: socket.id,
   });
 
+  // save uid => socket
   socketMap.set(socket.id, socket);
 
   socket.on("close", () => {
     console.log(`user@${socket.id} disconnected`);
     // delete socket
     socketMap.delete(socket.id);
+    /**
+     * @ATTENTION
+     * we assume that one client can only pub and sub one stream
+     * so pub/sub each present one peerconnection for a client
+     */
     // close then delete pub peerconnection
     if (pubMap.has(socket.id)) {
       pubMap.get(socket.id).pc.close();
@@ -61,14 +71,11 @@ io.on("connection", (socket) => {
        * }
        */
       if (pubMap.has(socket.id)) {
-        socket.send({
-          type: "err",
-          data: "you have already published a stream",
-        });
+        console.error(`user@${socket.id} has already published a stream`)
         return;
       }
       const { sdp } = msg;
-      // create pcrepresenting publish  and save
+      // create pub pc
       const pc = createPC();
       pc.onicecandidate = (e) => {
         if (e.candidate && e.candidate.candidate) {
@@ -79,6 +86,7 @@ io.on("connection", (socket) => {
           });
         }
       };
+      // uid => { pc }
       pubMap.set(socket.id, { pc, stream: null });
       // save stream for transfer
       pc.ontrack = (e) => {
@@ -91,6 +99,7 @@ io.on("connection", (socket) => {
       await pc.setRemoteDescription(new webrtc.RTCSessionDescription(sdp));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
+      // send answer back to client
       socket.send({
         type: "pub",
         sdp: pc.localDescription,
@@ -105,44 +114,43 @@ io.on("connection", (socket) => {
        * }
        */
       if (subMap.has(socket.id)) {
-        socket.send({
-          type: "err",
-          data: "you have already subscribed a stream",
-        });
+        console.error(`user@${socket.id} has already subscribed a stream`)
         return;
       }
       const { tar, sdp } = msg;
       // get pc which will be subscribed
       const pubPC = pubMap.get(tar);
-      if (pubPC) {
-        // create pc representing subscribe and save
-        const pc = createPC();
-        pc.onicecandidate = (e) => {
-          if (e.candidate && e.candidate.candidate) {
-            socket.send({
-              type: "ice",
-              from: "sub",
-              candidate: e.candidate,
-            });
-          }
-        };
-        subMap.set(socket.id, pc);
-        // pass published meida track to subscriber
-        pubPC.stream.getTracks().forEach((track) => {
-          console.log(`foward track for user@${socket.id} to subscribe`);
-          pc.addTrack(track, pubPC.stream);
-        });
-        // recv offer and send answer
-        await pc.setRemoteDescription(new webrtc.RTCSessionDescription(sdp));
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        socket.send({
-          type: "sub",
-          sdp: pc.localDescription,
-        });
-      } else {
-        console.error("no such uid to subscribe");
+      if (!pubPC) {
+        console.error(`no such stream to subscribe: ${tar}`);
+        return;
       }
+      // create sub pc
+      const pc = createPC();
+      pc.onicecandidate = (e) => {
+        if (e.candidate && e.candidate.candidate) {
+          socket.send({
+            type: "ice",
+            from: "sub",
+            candidate: e.candidate,
+          });
+        }
+      };
+      // uid => pc
+      subMap.set(socket.id, pc);
+      // pass published meida track to subscriber
+      pubPC.stream.getTracks().forEach((track) => {
+        console.log(`foward track for user@${socket.id} to subscribe`);
+        pc.addTrack(track, pubPC.stream);
+      });
+      // recv offer and send answer
+      await pc.setRemoteDescription(new webrtc.RTCSessionDescription(sdp));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      // send answer back to client
+      socket.send({
+        type: "sub",
+        sdp: pc.localDescription,
+      });
     } else if (type === "ice") {
       /**
        * client send ice candidates
@@ -154,6 +162,7 @@ io.on("connection", (socket) => {
        */
       const { from, candidate } = msg;
       let pc;
+      // recv both pub&sub candidates
       if (from === "pub") {
         pc = pubMap.get(socket.id).pc;
       } else if (from === "sub") {
@@ -164,13 +173,6 @@ io.on("connection", (socket) => {
       }
     }
   });
-});
-
-/**
- * launch server
- */
-server.listen(PORT, () => {
-  console.log(`sfu server listening on ${PORT}`);
 });
 
 /**
@@ -185,3 +187,10 @@ function createPC() {
   });
   return pc;
 }
+
+/**
+ * launch server
+ */
+server.listen(PORT, () => {
+  console.log(`sfu server listening on ${PORT}`);
+});

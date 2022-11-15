@@ -1,152 +1,192 @@
 <!DOCTYPE html>
 <html>
+  <head>
+    <title>example | sfu-server-wrtc</title>
+  </head>
 
-<head>
-  <title>example | sfu-server-wrtc </title>
-</head>
+  <body>
+    <style>
+      video {
+        width: 640px;
+        height: 480px;
+      }
+    </style>
 
-<body>
-  <style>
-    video {
-      width: 640px;
-      height: 480px;
-    }
-  </style>
+    <video autoplay id="local"></video>
+    <button id="pub">publish</button>
+    <video autoplay id="remote"></video>
+    <button id="sub">subscribe</button>
 
-  <video autoplay id="local"></video>
-  <button id="pub">publish</button>
-  <video autoplay id="remote"></video>
-  <button id="sub">subscribe</button>
-
-  <script src="./socket.io.min.js"></script>
-  <script>
-    window.onload = () => {
-      const localVideo = document.getElementById('local');
-      const remoteVideo = document.getElementById('remote');
-      const pubBtn = document.getElementById('pub');
-      const subBtn = document.getElementById('sub');
-
-      const socket = io('http://127.0.0.1:3004');
-      let uid = '';
-      let pubPC, subPC;
-
+    <script src="./socket.io.min.js"></script>
+    <script>
       /**
-       * handle socket message
+       * create peerconnection
        */
-      socket.on('message', async (msg) => {
-        console.log(msg);
-
-        const { type } = msg;
-        if (type === 'hi') {
-          uid = msg.uid;
-        } else if (type === 'pub') {
-          if (!pubPC) {
-            console.error('no pub pc');
-            return;
-          }
-          const { sdp } = msg;
-          await pubPC.setRemoteDescription(new RTCSessionDescription(sdp));
-        } else if (type === 'sub') {
-          if (!subPC) {
-            console.error('no sub pc');
-            return;
-          }
-          const { sdp } = msg;
-          await subPC.setRemoteDescription(new RTCSessionDescription(sdp));
-        } else if (type === 'ice') {
-          const { from, candidate } = msg;
-          if (from === 'pub') {
-            pubPC && pubPC.addIceCandidate(candidate);
-          } else if (from === 'sub') {
-            subPC && subPC.addIceCandidate(candidate);
-          }
-        } else if (type === 'err') {
-          const { data } = msg;
-          console.error(data);
-        }
-      })
-
-      /**
-       * request publish
-       */
-      pubBtn.onclick = async () => {
-        if (pubPC) {
-          console.error('alreay published');
-          return;
-        }
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true
-        });
-        localVideo.srcObject = stream;
-        pubPC = new RTCPeerConnection({
+      function createPC() {
+        const pc = new webrtc.RTCPeerConnection({
           iceServers: [
             { urls: "stun:stun.stunprotocol.org:3478" },
             { urls: "stun:stun.l.google.com:19302" },
           ],
         });
-        pubPC.onicecandidate = (e) => {
-          if (e.candidate && e.candidate.candidate) {
-            socket.send({
-              type: 'ice',
-              from: 'pub',
-              candidate: e.candidate
-            });
+        return pc;
+      }
+    </script>
+    <script>
+      window.onload = () => {
+        /**
+         * query elements
+         */
+        const localVideo = document.getElementById("local");
+        const remoteVideo = document.getElementById("remote");
+        const pubBtn = document.getElementById("pub");
+        const subBtn = document.getElementById("sub");
+
+        /**
+         * connect to server
+         */
+        const socket = io("http://127.0.0.1:3004");
+
+        let uid = "";
+        // 1 client => 1 pub pc & 1 sub pc
+        let pubPC, subPC;
+
+        socket.on("message", async (msg) => {
+          console.log(msg);
+
+          const { type } = msg;
+          if (type === "hi") {
+            /**
+             * get uid when connected
+             * {
+             *   type: 'hi',
+             *   uid: [uid]
+             * }
+             */
+            uid = msg.uid;
+          } else if (type === "pub") {
+            /**
+             * recv anwser from server
+             * {
+             *   type: 'pub',
+             *   sdp: [server.localDescription]
+             * }
+             */
+            if (!pubPC) {
+              console.error("no pub pc");
+              return;
+            }
+            const { sdp } = msg;
+            await pubPC.setRemoteDescription(new RTCSessionDescription(sdp));
+          } else if (type === "sub") {
+            /**
+             * recv anwser from server (same as pub handler)
+             * {
+             *   type: 'sub',
+             *   sdp: [server.localDescription]
+             * }
+             */
+            if (!subPC) {
+              console.error("no sub pc");
+              return;
+            }
+            const { sdp } = msg;
+            await subPC.setRemoteDescription(new RTCSessionDescription(sdp));
+          } else if (type === "ice") {
+            /**
+             * recv anwser from server (same as pub handler)
+             * {
+             *   type: 'sub',
+             *   from: 'pub' | 'sub',
+             *   candidate: [server.iceCandidate]
+             * }
+             */
+            const { from, candidate } = msg;
+            if (from === "pub") {
+              pubPC && pubPC.addIceCandidate(candidate);
+            } else if (from === "sub") {
+              subPC && subPC.addIceCandidate(candidate);
+            }
           }
+        });
+
+        /**
+         * request publish
+         */
+        pubBtn.onclick = async () => {
+          if (pubPC) {
+            console.error("alreay published");
+            return;
+          }
+          // capture local stream and show
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: true,
+          });
+          localVideo.srcObject = stream;
+          // create pc
+          pubPC = createPC();
+          pubPC.onicecandidate = (e) => {
+            if (e.candidate && e.candidate.candidate) {
+              socket.send({
+                type: "ice",
+                from: "pub",
+                candidate: e.candidate,
+              });
+            }
+          };
+          // add local track to pc
+          stream.getTracks().forEach((track) => {
+            pubPC.addTrack(track, stream);
+          });
+          // create offer and send to server
+          const offer = await pubPC.createOffer();
+          await pubPC.setLocalDescription(offer);
+          socket.send({
+            type: "pub",
+            sdp: pubPC.localDescription,
+          });
         };
-        stream.getTracks().forEach(track => {
-          pubPC.addTrack(track, stream);
-        });
-        const offer = await pubPC.createOffer();
-        await pubPC.setLocalDescription(offer);
-        socket.send({
-          type: 'pub',
-          sdp: pubPC.localDescription
-        });
+
+        /**
+         * request subscribe
+         */
+        subBtn.onclick = async () => {
+          if (subPC) {
+            console.error("already subscribed");
+            return;
+          }
+          // get subscribe target uid from user input
+          const targetUID = prompt("input subscribe uid:");
+          // create pc and add empty video&audio stream
+          subPC = createPC();
+          subPC.addTransceiver("video", { direction: "recvonly" });
+          subPC.addTransceiver("audio", { direction: "recvonly" });
+          subPC.onicecandidate = (e) => {
+            if (e.candidate && e.candidate.candidate) {
+              socket.send({
+                type: "ice",
+                from: "sub",
+                candidate: e.candidate,
+              });
+            }
+          };
+          // when recv remote stream, show it
+          subPC.ontrack = (e) => {
+            if (e.streams && e.streams[0]) {
+              remoteVideo.srcObject = e.streams[0];
+            }
+          };
+          // create offer and send to server
+          const offer = await subPC.createOffer();
+          await subPC.setLocalDescription(offer);
+          socket.send({
+            type: "sub",
+            tar: targetUID,
+            sdp: subPC.localDescription,
+          });
+        };
       };
-
-      /**
-       * request subscribe
-       */
-      subBtn.onclick = async () => {
-        if (subPC) {
-          console.error('already subscribed');
-          return;
-        }
-        const targetUID = prompt('input subscribe uid:');
-        subPC = new RTCPeerConnection({
-          iceServers: [
-            { urls: "stun:stun.stunprotocol.org:3478" },
-            { urls: "stun:stun.l.google.com:19302" },
-          ],
-        });
-        subPC.addTransceiver('video', { direction: 'recvonly' });
-        subPC.addTransceiver('audio', { direction: 'recvonly' });
-        subPC.onicecandidate = (e) => {
-          if (e.candidate && e.candidate.candidate) {
-            socket.send({
-              type: 'ice',
-              from: 'sub',
-              candidate: e.candidate
-            });
-          }
-        };
-        subPC.ontrack = (e) => {
-          if (e.streams && e.streams[0]) {
-            remoteVideo.srcObject = e.streams[0];
-          }
-        };
-        const offer = await subPC.createOffer();
-        await subPC.setLocalDescription(offer);
-        socket.send({
-          type: 'sub',
-          tar: targetUID,
-          sdp: subPC.localDescription
-        });
-      };
-    };
-
-  </script>
-</body>
-
+    </script>
+  </body>
 </html>
